@@ -16,7 +16,6 @@
  * limitations under the License.
  */
 
-
 package io.gearpump.services
 
 import java.io.{File, IOException}
@@ -35,14 +34,12 @@ import io.gearpump.cluster.client.ClientContext
 import io.gearpump.cluster.main.AppSubmitter
 import io.gearpump.cluster.worker.WorkerSummary
 import io.gearpump.partitioner.{PartitionerByClassName, PartitionerDescription}
+import io.gearpump.services.MasterService.BuiltinPartitioners
 import io.gearpump.streaming.StreamApplication
 import io.gearpump.streaming.appmaster.SubmitApplicationRequest
 import io.gearpump.util.ActorUtil.{askActor, _}
 import io.gearpump.util.FileDirective._
 import io.gearpump.util.{Constants, Util}
-import io.gearpump.util.ActorUtil._
-import io.gearpump.util.{Constants, FileUtils, Util}
-import io.gearpump.services.MasterService.BuiltinPartitioners
 
 import scala.collection.JavaConversions._
 import scala.concurrent.{ExecutionContext, Future}
@@ -137,6 +134,16 @@ trait MasterService {
                     }
                   }
                 }
+              }
+            }
+          } ~
+          path("submitdag2") {
+            uploadFile { fileMap =>
+              // update file path of SubmitApplicationRequest
+
+
+              entity(as[String]) { request =>
+                complete(write((request, fileMap.toString())))
               }
             }
           } ~

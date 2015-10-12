@@ -22,6 +22,7 @@ import java.io.File
 
 import akka.actor.ActorRef
 import akka.http.scaladsl.marshalling.Marshal
+import akka.http.scaladsl.model.Multipart.FormData.BodyPart
 import akka.http.scaladsl.model._
 import akka.stream.io.SynchronousFileSource
 import akka.stream.scaladsl.Source
@@ -45,10 +46,12 @@ import scala.concurrent.duration._
 import scala.util.{Success, Try}
 
 class MasterServiceSpec extends FlatSpec with ScalatestRouteTest with MasterService with
-  Matchers with BeforeAndAfterAll with JarStoreProvider{
+Matchers with BeforeAndAfterAll with JarStoreProvider {
+
   import upickle.default.{read, write}
 
   def actorRefFactory = system
+
   val workerId = 0
   val mockWorker = TestProbe()
 
@@ -58,6 +61,8 @@ class MasterServiceSpec extends FlatSpec with ScalatestRouteTest with MasterServ
 
   mockWorker.setAutoPilot {
     new AutoPilot {
+      implicit val routeTestTimeout = RouteTestTimeout(30.second)
+
       def run(sender: ActorRef, msg: Any) = msg match {
         case GetWorkerData(workerId) =>
           sender ! WorkerData(WorkerSummary.empty.copy(state = "active", workerId = workerId))
@@ -76,7 +81,7 @@ class MasterServiceSpec extends FlatSpec with ScalatestRouteTest with MasterServ
         case GetMasterData =>
           sender ! MasterData(null)
           KeepRunning
-        case  AppMastersDataRequest =>
+        case AppMastersDataRequest =>
           sender ! AppMastersData(List.empty[AppMasterData])
           KeepRunning
         case GetAllWorkers =>
@@ -101,7 +106,6 @@ class MasterServiceSpec extends FlatSpec with ScalatestRouteTest with MasterServ
   def master = mockMaster.ref
 
   it should "return master info when asked" in {
-    implicit val customTimeout = RouteTestTimeout(15.seconds)
     (Get(s"/api/$REST_VERSION/master") ~> masterRoute) ~> check {
       // check the type
       val content = responseAs[String]
@@ -112,7 +116,6 @@ class MasterServiceSpec extends FlatSpec with ScalatestRouteTest with MasterServ
   }
 
   it should "return a json structure of appMastersData for GET request" in {
-    implicit val customTimeout = RouteTestTimeout(15.seconds)
     (Get(s"/api/$REST_VERSION/master/applist") ~> masterRoute) ~> check {
       //check the type
       read[AppMastersData](responseAs[String])
@@ -121,12 +124,11 @@ class MasterServiceSpec extends FlatSpec with ScalatestRouteTest with MasterServ
   }
 
   it should "return a json structure of worker data for GET request" in {
-    implicit val customTimeout = RouteTestTimeout(25.seconds)
     Get(s"/api/$REST_VERSION/master/workerlist") ~> masterRoute ~> check {
       //check the type
       val workerListJson = responseAs[String]
       val workers = read[List[WorkerSummary]](workerListJson)
-      assert(workers.size > 0)
+      assert(workers.nonEmpty)
       workers.foreach { worker =>
         worker.state shouldBe "active"
       }
@@ -137,8 +139,7 @@ class MasterServiceSpec extends FlatSpec with ScalatestRouteTest with MasterServ
   }
 
   it should "return config for master" in {
-    implicit val customTimeout = RouteTestTimeout(15.seconds)
-    (Get(s"/api/$REST_VERSION/master/config") ~> masterRoute) ~> check{
+    (Get(s"/api/$REST_VERSION/master/config") ~> masterRoute) ~> check {
       val responseBody = responseAs[String]
       val config = Try(ConfigFactory.parseString(responseBody))
       assert(config.isSuccess)
@@ -146,39 +147,34 @@ class MasterServiceSpec extends FlatSpec with ScalatestRouteTest with MasterServ
     mockMaster.expectMsg(QueryMasterConfig)
   }
 
-  "submitJar" should "submit an invalid jar and get success = false" in {
+  it should "submit an invalid jar and get success = false" in {
     implicit val routeTestTimeout = RouteTestTimeout(30.second)
-    val tempfile = new File("foo")
-
-    val request = entity(tempfile)
+    val tempfile = new File("some.jar")
+    val request = createFileEntity(tempfile, "jar")
 
     Post(s"/api/$REST_VERSION/master/submitapp", request) ~> masterRoute ~> check {
       assert(response.status.intValue == 500)
     }
   }
 
-  private def entity(file: File)(implicit ec: ExecutionContext): Future[RequestEntity] = {
-    val entity =  HttpEntity(MediaTypes.`application/octet-stream`, file.length(), SynchronousFileSource(file, chunkSize = 100000))
-    val body = Source.single(
-      Multipart.FormData.BodyPart(
-        "file",
-        entity,
-        Map("filename" -> file.getName)))
+  private def createFileEntity(file: File, name: String)(implicit ec: ExecutionContext): Future[RequestEntity] = {
+    val entity = HttpEntity(MediaTypes.`application/octet-stream`, file.length(),
+      SynchronousFileSource(file, chunkSize = 100000))
+    val body = Source.single(Multipart.FormData.BodyPart(
+      name, entity, Map("filename" -> file.getName)))
     val form = Multipart.FormData(body)
-
     Marshal(form).to[RequestEntity]
   }
 
-  "MetricsQueryService" should "return history metrics" in {
-    implicit val customTimeout = RouteTestTimeout(15.seconds)
-    (Get(s"/api/$REST_VERSION/master/metrics/master") ~> masterRoute)~> check {
+  it should "return history metrics" in {
+    (Get(s"/api/$REST_VERSION/master/metrics/master") ~> masterRoute) ~> check {
       val responseBody = responseAs[String]
       val config = Try(ConfigFactory.parseString(responseBody))
       assert(config.isSuccess)
     }
   }
 
-  "submitDag" should "submit a SubmitApplicationRequest and get an appId > 0" in {
+  it should "submit an application along with upload jar files and get a positive `appId`" in {
     import io.gearpump.util.Graph._
     val processors = Map(
       0 -> ProcessorDescription(0, "A", parallelism = 1),
@@ -193,7 +189,7 @@ class MasterServiceSpec extends FlatSpec with ScalatestRouteTest with MasterServ
     }
   }
 
-  "MasterService" should "return Gearpump built-in partitioner list" in {
+  it should "return Gearpump built-in partitioner list" in {
     (Get(s"/api/$REST_VERSION/master/partitioners") ~> masterRoute) ~> check {
       val responseBody = responseAs[String]
       val partitioners = read[BuiltinPartitioners](responseBody)
