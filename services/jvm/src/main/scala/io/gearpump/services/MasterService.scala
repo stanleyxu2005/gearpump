@@ -140,10 +140,11 @@ trait MasterService {
           path("submitdag2") {
             uploadFile { fileMap =>
               // update file path of SubmitApplicationRequest
-
-
               entity(as[String]) { request =>
-                complete(write((request, fileMap.toString())))
+                complete(write(Map(
+                  "request" ->request,
+                  "files" ->fileMap.toString()
+                )))
               }
             }
           } ~
