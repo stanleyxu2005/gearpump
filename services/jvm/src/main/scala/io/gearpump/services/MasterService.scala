@@ -22,11 +22,13 @@ package io.gearpump.services
 import java.io.{File, IOException}
 
 import akka.actor.{ActorRef, ActorSystem}
+import akka.http.scaladsl.model.Multipart
 import akka.http.scaladsl.server.Directives._
 import akka.http.scaladsl.server.Route
 import akka.http.scaladsl.server.directives.ParameterDirectives.ParamMagnet
 import akka.http.scaladsl.unmarshalling.Unmarshaller._
 import com.typesafe.config.Config
+import io.gearpump.cluster.{UserConfig, AppJar}
 import io.gearpump.cluster.AppMasterToMaster.{GetAllWorkers, GetMasterData, GetWorkerData, MasterData, WorkerData}
 import io.gearpump.cluster.ClientToMaster.{QueryHistoryMetrics, QueryMasterConfig}
 import io.gearpump.cluster.MasterToAppMaster.{AppMastersData, AppMastersDataRequest, WorkerList}
@@ -34,15 +36,17 @@ import io.gearpump.cluster.MasterToClient.{HistoryMetrics, MasterConfig, SubmitA
 import io.gearpump.cluster.client.ClientContext
 import io.gearpump.cluster.main.AppSubmitter
 import io.gearpump.cluster.worker.WorkerSummary
+import io.gearpump.jarstore.FilePath
 import io.gearpump.partitioner.{PartitionerByClassName, PartitionerDescription}
-import io.gearpump.streaming.StreamApplication
+import io.gearpump.streaming._
 import io.gearpump.streaming.appmaster.SubmitApplicationRequest
 import io.gearpump.util.ActorUtil.{askActor, _}
+import io.gearpump.util.Constants
 import io.gearpump.util.FileDirective._
-import io.gearpump.util.{Constants, Util}
+import io.gearpump.util._
 import io.gearpump.util.ActorUtil._
-import io.gearpump.util.{Constants, FileUtils, Util}
 import io.gearpump.services.MasterService.BuiltinPartitioners
+import spray.json.JsObject
 
 import scala.collection.JavaConversions._
 import scala.concurrent.{ExecutionContext, Future}
@@ -141,26 +145,38 @@ trait MasterService {
             }
           } ~
           path("submitdag") {
-            post {
-              entity(as[String]) { request =>
+            formFields('app.as[String]) { (app) =>
+              // Save uploaded user jar files and update processor description
+              uploadFile { fileMap =>
                 import io.gearpump.services.util.UpickleUtil._
-                val msg = java.net.URLDecoder.decode(request, "UTF-8")
-                val submitApplicationRequest = read[SubmitApplicationRequest](msg)
-                import submitApplicationRequest.{appName, dag, processors, userconfig}
+                val sar = read[SubmitApplicationRequest](app)
+                import sar.{appName, dag, processors, userconfig}
                 val context = ClientContext(system.settings.config, system, master)
-
-                val graph = dag.mapVertex { processorId =>
-                  processors(processorId)
+                val graph = dag.mapVertex { processorId => {
+                  val processor = processors(processorId)
+                  if (processor.jar != null) {
+                    val entry = fileMap.get(processor.jar.name)
+                    if (!entry.isEmpty) {
+                      ProcessorDescription(
+                        processor.id,
+                        processor.taskClass,
+                        processor.parallelism,
+                        processor.description,
+                        processor.taskConf,
+                        processor.life,
+                        AppJar(processor.jar.name,
+                          FilePath(entry.get.file.getAbsolutePath))
+                      )
+                    }
+                  }
+                  processor
+                }
                 }.mapEdge { (node1, edge, node2) =>
                   PartitionerDescription(new PartitionerByClassName(edge))
                 }
-
                 val appId = context.submit(new StreamApplication(appName, userconfig, graph))
-
-                import upickle.default.write
-                val submitApplicationResultValue = SubmitApplicationResultValue(appId)
-                val jsonData = write(submitApplicationResultValue)
-                complete(jsonData)
+                val response = SubmitApplicationResultValue(appId)
+                complete(write(response))
               }
             }
           } ~

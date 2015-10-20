@@ -18,29 +18,29 @@
 
 package io.gearpump.services
 
-import java.io.File
+import java.io.{File, FileWriter}
 
 import akka.actor.ActorRef
-import akka.http.scaladsl.marshalling.Marshal
 import akka.http.scaladsl.model._
-import akka.stream.io.SynchronousFileSource
+import akka.http.scaladsl.testkit.{RouteTestTimeout, ScalatestRouteTest}
 import akka.stream.scaladsl.Source
 import akka.testkit.TestActor.{AutoPilot, KeepRunning}
 import akka.testkit.TestProbe
 import com.typesafe.config.ConfigFactory
+import io.gearpump.cluster.AppJar
 import io.gearpump.cluster.AppMasterToMaster.{GetAllWorkers, GetMasterData, GetWorkerData, MasterData, WorkerData}
 import io.gearpump.cluster.ClientToMaster.{QueryHistoryMetrics, QueryMasterConfig, ResolveWorkerId, SubmitApplication}
 import io.gearpump.cluster.MasterToAppMaster.{AppMasterData, AppMastersData, AppMastersDataRequest, WorkerList}
 import io.gearpump.cluster.MasterToClient._
 import io.gearpump.cluster.worker.WorkerSummary
-import io.gearpump.services.MasterService.BuiltinPartitioners
 import io.gearpump.jarstore.JarStoreService
+import io.gearpump.services.MasterService.BuiltinPartitioners
+import io.gearpump.services.mock.JarStoreServiceMock
 import io.gearpump.streaming.ProcessorDescription
 import io.gearpump.streaming.appmaster.SubmitApplicationRequest
-import io.gearpump.util.{Constants, Graph}
+import io.gearpump.util.Graph
 import org.scalatest.{BeforeAndAfterAll, FlatSpec, Matchers}
-import akka.http.scaladsl.testkit.{RouteTestTimeout, ScalatestRouteTest}
-import scala.concurrent.{Future, ExecutionContext}
+
 import scala.concurrent.duration._
 import scala.util.{Success, Try}
 
@@ -52,7 +52,8 @@ class MasterServiceSpec extends FlatSpec with ScalatestRouteTest with MasterServ
   val workerId = 0
   val mockWorker = TestProbe()
 
-  lazy val jarStoreService = JarStoreService.get(system.settings.config)
+  lazy val jarStoreService = new JarStoreServiceMock()
+  implicit val routeTestTimeout = RouteTestTimeout(30.second)
 
   override def getJarStoreService: JarStoreService = jarStoreService
 
@@ -101,7 +102,6 @@ class MasterServiceSpec extends FlatSpec with ScalatestRouteTest with MasterServ
   def master = mockMaster.ref
 
   it should "return master info when asked" in {
-    implicit val customTimeout = RouteTestTimeout(15.seconds)
     (Get(s"/api/$REST_VERSION/master") ~> masterRoute) ~> check {
       // check the type
       val content = responseAs[String]
@@ -112,7 +112,6 @@ class MasterServiceSpec extends FlatSpec with ScalatestRouteTest with MasterServ
   }
 
   it should "return a json structure of appMastersData for GET request" in {
-    implicit val customTimeout = RouteTestTimeout(15.seconds)
     (Get(s"/api/$REST_VERSION/master/applist") ~> masterRoute) ~> check {
       //check the type
       read[AppMastersData](responseAs[String])
@@ -121,7 +120,6 @@ class MasterServiceSpec extends FlatSpec with ScalatestRouteTest with MasterServ
   }
 
   it should "return a json structure of worker data for GET request" in {
-    implicit val customTimeout = RouteTestTimeout(25.seconds)
     Get(s"/api/$REST_VERSION/master/workerlist") ~> masterRoute ~> check {
       //check the type
       val workerListJson = responseAs[String]
@@ -137,7 +135,6 @@ class MasterServiceSpec extends FlatSpec with ScalatestRouteTest with MasterServ
   }
 
   it should "return config for master" in {
-    implicit val customTimeout = RouteTestTimeout(15.seconds)
     (Get(s"/api/$REST_VERSION/master/config") ~> masterRoute) ~> check{
       val responseBody = responseAs[String]
       val config = Try(ConfigFactory.parseString(responseBody))
@@ -146,31 +143,42 @@ class MasterServiceSpec extends FlatSpec with ScalatestRouteTest with MasterServ
     mockMaster.expectMsg(QueryMasterConfig)
   }
 
-  "submitJar" should "submit an invalid jar and get success = false" in {
-    implicit val routeTestTimeout = RouteTestTimeout(30.second)
-    val tempfile = new File("foo")
+  def withInvalidJar(testCode: (File) => Any) {
+    val file = File.createTempFile("temp", ".")
+    val writer = new FileWriter(file)
+    try {
+      writer.write("this is an invalid jar")
+      writer.flush()
+      testCode(file)
+    }
+    finally {
+      writer.close()
+      file.deleteOnExit()
+    }
+  }
 
-    val request = entity(tempfile)
-
-    Post(s"/api/$REST_VERSION/master/submitapp", request) ~> masterRoute ~> check {
+  "submit an invalid user app" should "create an internal server error (HTTP 500)" in withInvalidJar {file =>
+    val form = Multipart.FormData(
+      Multipart.FormData.BodyPart.fromFile("jar", ContentTypes.`application/octet-stream`, file)
+    )
+    Post(s"/api/$REST_VERSION/master/submitapp", form) ~> masterRoute ~> check {
       assert(response.status.intValue == 500)
     }
   }
 
-  private def entity(file: File)(implicit ec: ExecutionContext): Future[RequestEntity] = {
-    val entity =  HttpEntity(MediaTypes.`application/octet-stream`, file.length(), SynchronousFileSource(file, chunkSize = 100000))
-    val body = Source.single(
-      Multipart.FormData.BodyPart(
-        "file",
-        entity,
-        Map("filename" -> file.getName)))
-    val form = Multipart.FormData(body)
+  "upload a jar file" should "be saved to server and get its remote path" in withInvalidJar {file =>
+    val form = Multipart.FormData(
+      Multipart.FormData.BodyPart.fromFile("jar", ContentTypes.`application/octet-stream`, file)
+    )
 
-    Marshal(form).to[RequestEntity]
+    Post(s"/api/$REST_VERSION/master/uploadjar", form) ~> masterRoute ~> check {
+      assert(response.status.isSuccess())
+      val json = read[AppJar](responseAs[String])
+      json.filePath.path shouldBe "mock"
+    }
   }
 
   "MetricsQueryService" should "return history metrics" in {
-    implicit val customTimeout = RouteTestTimeout(15.seconds)
     (Get(s"/api/$REST_VERSION/master/metrics/master") ~> masterRoute)~> check {
       val responseBody = responseAs[String]
       val config = Try(ConfigFactory.parseString(responseBody))
@@ -178,18 +186,24 @@ class MasterServiceSpec extends FlatSpec with ScalatestRouteTest with MasterServ
     }
   }
 
-  "submitDag" should "submit a SubmitApplicationRequest and get an appId > 0" in {
+  "Submit a DAG" should "start an application and get a valid appid" in withInvalidJar {file =>
     import io.gearpump.util.Graph._
     val processors = Map(
       0 -> ProcessorDescription(0, "A", parallelism = 1),
       1 -> ProcessorDescription(1, "B", parallelism = 1)
     )
     val dag = Graph(0 ~ "partitioner" ~> 1)
-    val jsonValue = write(SubmitApplicationRequest("complexdag", processors, dag))
-    Post(s"/api/$REST_VERSION/master/submitdag", HttpEntity(ContentTypes.`application/json`, jsonValue)) ~> masterRoute ~> check {
+    val app = write(SubmitApplicationRequest("complexdag", processors, dag))
+    val form = Multipart.FormData(
+      Multipart.FormData.BodyPart.fromFile("jar",
+        ContentTypes.`application/octet-stream`, file),
+      Multipart.FormData.BodyPart("app", app)
+    )
+
+    Post(s"/api/$REST_VERSION/master/submitdag", form) ~> masterRoute ~> check {
       val responseBody = responseAs[String]
-      val submitApplicationResultValue = read[SubmitApplicationResultValue](responseBody)
-      assert(submitApplicationResultValue.appId >= 0, "invalid appid")
+      val json = read[SubmitApplicationResultValue](responseBody)
+      json.appId shouldBe >= (0)
     }
   }
 
