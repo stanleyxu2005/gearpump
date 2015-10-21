@@ -15,7 +15,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.gearpump.services
 
 import java.io.{File, FileWriter}
@@ -23,7 +22,6 @@ import java.io.{File, FileWriter}
 import akka.actor.ActorRef
 import akka.http.scaladsl.model._
 import akka.http.scaladsl.testkit.{RouteTestTimeout, ScalatestRouteTest}
-import akka.stream.scaladsl.Source
 import akka.testkit.TestActor.{AutoPilot, KeepRunning}
 import akka.testkit.TestProbe
 import com.typesafe.config.ConfigFactory
@@ -33,7 +31,7 @@ import io.gearpump.cluster.ClientToMaster.{QueryHistoryMetrics, QueryMasterConfi
 import io.gearpump.cluster.MasterToAppMaster.{AppMasterData, AppMastersData, AppMastersDataRequest, WorkerList}
 import io.gearpump.cluster.MasterToClient._
 import io.gearpump.cluster.worker.WorkerSummary
-import io.gearpump.jarstore.JarStoreService
+import io.gearpump.jarstore.{FilePath, JarStoreService}
 import io.gearpump.services.MasterService.BuiltinPartitioners
 import io.gearpump.services.mock.JarStoreServiceMock
 import io.gearpump.streaming.ProcessorDescription
@@ -124,7 +122,7 @@ class MasterServiceSpec extends FlatSpec with ScalatestRouteTest with MasterServ
       //check the type
       val workerListJson = responseAs[String]
       val workers = read[List[WorkerSummary]](workerListJson)
-      assert(workers.size > 0)
+      assert(workers.nonEmpty)
       workers.foreach { worker =>
         worker.state shouldBe "active"
       }
@@ -143,11 +141,11 @@ class MasterServiceSpec extends FlatSpec with ScalatestRouteTest with MasterServ
     mockMaster.expectMsg(QueryMasterConfig)
   }
 
-  def withInvalidJar(testCode: (File) => Any) {
+  def withJarMock(testCode: (File) => Any) {
     val file = File.createTempFile("temp", ".")
     val writer = new FileWriter(file)
     try {
-      writer.write("this is an invalid jar")
+      writer.write("mocked jar file")
       writer.flush()
       testCode(file)
     }
@@ -157,7 +155,7 @@ class MasterServiceSpec extends FlatSpec with ScalatestRouteTest with MasterServ
     }
   }
 
-  "submit an invalid user app" should "create an internal server error (HTTP 500)" in withInvalidJar {file =>
+  "submit an invalid user app" should "create an internal server error (HTTP 500)" in withJarMock {file =>
     val form = Multipart.FormData(
       Multipart.FormData.BodyPart.fromFile("jar", ContentTypes.`application/octet-stream`, file)
     )
@@ -166,7 +164,7 @@ class MasterServiceSpec extends FlatSpec with ScalatestRouteTest with MasterServ
     }
   }
 
-  "upload a jar file" should "be saved to server and get its remote path" in withInvalidJar {file =>
+  "upload a jar file" should "be saved to server and get its remote path" in withJarMock {file =>
     val form = Multipart.FormData(
       Multipart.FormData.BodyPart.fromFile("jar", ContentTypes.`application/octet-stream`, file)
     )
@@ -186,16 +184,18 @@ class MasterServiceSpec extends FlatSpec with ScalatestRouteTest with MasterServ
     }
   }
 
-  "Submit a DAG" should "start an application and get a valid appid" in withInvalidJar {file =>
+  "Submit a DAG" should "start an application and get a valid appid" in withJarMock {file =>
     import io.gearpump.util.Graph._
     val processors = Map(
-      0 -> ProcessorDescription(0, "A", parallelism = 1),
-      1 -> ProcessorDescription(1, "B", parallelism = 1)
+      0 -> ProcessorDescription(0, "A", parallelism = 1, jar = AppJar("jar1", FilePath(""))),
+      1 -> ProcessorDescription(1, "B", parallelism = 1, jar = AppJar("jar2", FilePath("")))
     )
     val dag = Graph(0 ~ "partitioner" ~> 1)
     val app = write(SubmitApplicationRequest("complexdag", processors, dag))
     val form = Multipart.FormData(
-      Multipart.FormData.BodyPart.fromFile("jar",
+      Multipart.FormData.BodyPart.fromFile("jar1",
+        ContentTypes.`application/octet-stream`, file),
+      Multipart.FormData.BodyPart.fromFile("jar2",
         ContentTypes.`application/octet-stream`, file),
       Multipart.FormData.BodyPart("app", app)
     )
@@ -204,6 +204,26 @@ class MasterServiceSpec extends FlatSpec with ScalatestRouteTest with MasterServ
       val responseBody = responseAs[String]
       val json = read[SubmitApplicationResultValue](responseBody)
       json.appId shouldBe >= (0)
+    }
+  }
+
+  "Submit an incomplete DAG" should "return an error, if jar file is missing" in withJarMock {file =>
+    import io.gearpump.util.Graph._
+    val processors = Map(
+      0 -> ProcessorDescription(0, "A", parallelism = 1, jar = AppJar("jar1", FilePath(""))),
+      1 -> ProcessorDescription(1, "B", parallelism = 1, jar = AppJar("jar1", FilePath("")))
+    )
+    val dag = Graph(0 ~ "partitioner" ~> 1)
+    val app = write(SubmitApplicationRequest("complexdag", processors, dag))
+    val form = Multipart.FormData(
+      Multipart.FormData.BodyPart("app", app)
+    )
+
+    Post(s"/api/$REST_VERSION/master/submitdag", form) ~> masterRoute ~> check {
+      val responseBody = responseAs[String]
+      val json = read[MasterService.Status](responseBody)
+      json.success shouldBe false
+      json.reason should include ("jar1")
     }
   }
 

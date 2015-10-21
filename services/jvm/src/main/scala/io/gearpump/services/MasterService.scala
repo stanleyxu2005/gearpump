@@ -145,28 +145,27 @@ trait MasterService {
             }
           } ~
           path("submitdag") {
+            // unpack parameters
             formFields('app.as[String]) { (app) =>
-              // Save uploaded user jar files and update processor description
               uploadFile { fileMap =>
+
                 import io.gearpump.services.util.UpickleUtil._
                 val sar = read[SubmitApplicationRequest](app)
                 import sar.{appName, dag, processors, userconfig}
                 val context = ClientContext(system.settings.config, system, master)
+                var errors = List[String]()
                 val graph = dag.mapVertex { processorId => {
                   val processor = processors(processorId)
+                  // Update remote path of user upload jar files in processor description. In case
+                  // of any file mismatch, the request is considered as failed.
                   if (processor.jar != null) {
                     val entry = fileMap.get(processor.jar.name)
-                    if (!entry.isEmpty) {
-                      ProcessorDescription(
-                        processor.id,
-                        processor.taskClass,
-                        processor.parallelism,
-                        processor.description,
-                        processor.taskConf,
-                        processor.life,
-                        AppJar(processor.jar.name,
-                          FilePath(entry.get.file.getAbsolutePath))
-                      )
+                    if (entry.isEmpty) {
+                      errors ::= processor.jar.name
+                    } else {
+                      processor.copy(jar =
+                        processor.jar.copy(filePath =
+                          FilePath(entry.get.file.getAbsolutePath)))
                     }
                   }
                   processor
@@ -174,9 +173,16 @@ trait MasterService {
                 }.mapEdge { (node1, edge, node2) =>
                   PartitionerDescription(new PartitionerByClassName(edge))
                 }
-                val appId = context.submit(new StreamApplication(appName, userconfig, graph))
-                val response = SubmitApplicationResultValue(appId)
-                complete(write(response))
+
+                if (errors.length > 0) {
+                  complete(write(
+                    MasterService.Status(success = false,
+                      reason = s"Jar file (entity=${errors.head}) is not available")))
+                } else {
+                  val appId = context.submit(new StreamApplication(appName, userconfig, graph))
+                  val response = SubmitApplicationResultValue(appId)
+                  complete(write(response))
+                }
               }
             }
           } ~

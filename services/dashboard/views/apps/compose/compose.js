@@ -162,7 +162,7 @@ angular.module('dashboard')
         var data = $scope.visGraph.data;
         var processors = data.nodes.get();
         var edges = data.edges.get();
-        var args = {
+        var app = {
           appName: 'userapp',
           processors: processors.map(function(processor) {
             return [processor.id, {
@@ -181,7 +181,7 @@ angular.module('dashboard')
         };
 
         $scope.submitting = true;
-        models.submitDag($scope.files, args, function(response) {
+        models.submitDag(app, $scope.files, function(response) {
           $scope.submitting = false;
           $scope.submitted = response.success;
           $scope.shouldNoticeSubmitFailed = !response.success;

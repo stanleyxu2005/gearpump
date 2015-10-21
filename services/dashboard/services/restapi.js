@@ -132,31 +132,20 @@ angular.module('dashboard')
         },
 
         /** Submit an user defined application with user configuration */
-        submitDag: function(args, onComplete) {
-          var url = restapiV1Root + '/master/submitdag';
-          return $http.post(url, args).then(function(response) {
-            if (onComplete) {
-              onComplete(decodeSuccessResponse(response.data));
-            }
-          }, function(response) {
-            if (onComplete) {
-              onComplete(decodeErrorResponse(response.data));
-            }
-          });
-        },
-
-        /** Upload a set of JAR files */
-        uploadJars: function(files, onComplete) {
+        submitDag: function(app, file, onComplete) {
           var upload = Upload.upload({
-            url: restapiV1Root + '/master/uploadjar',
+            url: restapiV1Root + '/master/submitdag',
             method: 'POST',
-            file: files,
+            fields: {
+              app: app
+            },
+            file: file,
             fileFormDataName: 'jar'
           });
 
           upload.then(function(response) {
             if (onComplete) {
-              onComplete(decodeSuccessResponse({files: response.data}));
+              onComplete(decodeSuccessResponse(response.data));
             }
           }, function(response) {
             if (onComplete) {

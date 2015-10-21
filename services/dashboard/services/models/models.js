@@ -404,22 +404,18 @@ angular.module('dashboard')
           return dag;
         },
         /** Submit a DAG along with jar files */
-        submitDag: function(files, dag, onComplete) {
+        submitDag: function(app, files, onComplete) {
+          // todo: upgrade ng-file-upload to 9.x
           if (Object.keys(files).length !== 1) {
             return onComplete({success: false, message: 'One jar file is expected'});
           }
-          files = _.values(files)[0]; // todo: only one file can be uploaded once (issue 1450)
-          return restapi.uploadJars(files, function(response) {
-            if (!response.success) {
-              return onComplete(response);
-            }
-            // todo: cannot set jar for individual processor
-            angular.forEach(dag.processors, function(elem) {
-              elem[1].jar = response.files;
-            });
-            return restapi.submitDag(dag, function(response) {
-              return onComplete(response);
-            });
+          // todo: need to handle jar file and task class relationship
+          angular.forEach(app.processors, function(tuple) {
+            tuple[1].jar = Object.keys(files)[0];
+          });
+
+          return restapi.submitDag(app, _.values(files)[0], function(response) {
+            return onComplete(response);
           });
         }
       };
