@@ -133,17 +133,16 @@ angular.module('dashboard')
 
         /** Submit an user defined application with user configuration */
         submitDag: function(app, file, onComplete) {
-          var upload = Upload.upload({
+          var promise = Upload.upload({
             url: restapiV1Root + '/master/submitdag',
             method: 'POST',
-            fields: {
-              app: app
-            },
-            file: file,
-            fileFormDataName: 'jar'
+            data: {
+              app: Upload.json(app),
+              jar: file
+            }
           });
 
-          upload.then(function(response) {
+          promise.then(function(response) {
             if (onComplete) {
               onComplete(decodeSuccessResponse(response.data));
             }

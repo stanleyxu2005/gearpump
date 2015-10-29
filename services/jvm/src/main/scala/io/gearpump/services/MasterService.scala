@@ -22,6 +22,7 @@ package io.gearpump.services
 import java.io.{File, IOException}
 
 import akka.actor.{ActorRef, ActorSystem}
+import akka.event.Logging
 import akka.http.scaladsl.model.Multipart
 import akka.http.scaladsl.server.Directives._
 import akka.http.scaladsl.server.Route
@@ -145,44 +146,46 @@ trait MasterService {
             }
           } ~
           path("submitdag") {
-            // unpack parameters
-            formFields('app.as[String]) { (app) =>
-              uploadFile { fileMap =>
-
-                import io.gearpump.services.util.UpickleUtil._
-                val sar = read[SubmitApplicationRequest](app)
-                import sar.{appName, dag, processors, userconfig}
-                val context = ClientContext(system.settings.config, system, master)
-                var errors = List[String]()
-                val graph = dag.mapVertex { processorId => {
-                  val processor = processors(processorId)
-                  // Update remote path of user upload jar files in processor description. In case
-                  // of any file mismatch, the request is considered as failed.
-                  if (processor.jar != null) {
-                    val entry = fileMap.get(processor.jar.name)
-                    if (entry.isEmpty) {
-                      errors ::= processor.jar.name
-                    } else {
-                      processor.copy(jar =
-                        processor.jar.copy(filePath =
-                          FilePath(entry.get.file.getAbsolutePath)))
+            post {
+              logRequest("submitdag", Logging.DebugLevel) {
+              formFields('app.as[String]) { (app) =>
+                uploadFile { fileMap =>
+                  import io.gearpump.services.util.UpickleUtil._
+                  val sar = read[SubmitApplicationRequest](app)
+                  import sar.{appName, dag, processors, userconfig}
+                  val context = ClientContext(system.settings.config, system, master)
+                  var errors = List[String]()
+                  val graph = dag.mapVertex { processorId => {
+                    val processor = processors(processorId)
+                    // Update remote path of user upload jar files in processor description. In case
+                    // of any file mismatch, the request is considered as failed.
+                    if (processor.jar != null) {
+                      val entry = fileMap.get(processor.jar.name)
+                      if (entry.isEmpty) {
+                        errors ::= processor.jar.name
+                      } else {
+                        processor.copy(jar =
+                          processor.jar.copy(filePath =
+                            FilePath(entry.get.file.getAbsolutePath)))
+                      }
                     }
+                    processor
                   }
-                  processor
-                }
-                }.mapEdge { (node1, edge, node2) =>
-                  PartitionerDescription(new PartitionerByClassName(edge))
-                }
+                  }.mapEdge { (node1, edge, node2) =>
+                    PartitionerDescription(new PartitionerByClassName(edge))
+                  }
 
-                if (errors.length > 0) {
-                  complete(write(
-                    MasterService.Status(success = false,
-                      reason = s"Jar file (entity=${errors.head}) is not available")))
-                } else {
-                  val appId = context.submit(new StreamApplication(appName, userconfig, graph))
-                  val response = SubmitApplicationResultValue(appId)
-                  complete(write(response))
+                  if (errors.length > 0) {
+                    complete(write(
+                      MasterService.Status(success = false,
+                        reason = s"Jar file (entity=${errors.head}) is not available")))
+                  } else {
+                    val appId = context.submit(new StreamApplication(appName, userconfig, graph))
+                    val response = SubmitApplicationResultValue(appId)
+                    complete(write(response))
+                  }
                 }
+              }
               }
             }
           } ~

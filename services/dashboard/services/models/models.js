@@ -411,7 +411,7 @@ angular.module('dashboard')
           }
           // todo: need to handle jar file and task class relationship
           angular.forEach(app.processors, function(tuple) {
-            tuple[1].jar = Object.keys(files)[0];
+            tuple[1].jar = {name: 'jar', filePath: {path: ''}};
           });
 
           return restapi.submitDag(app, _.values(files)[0], function(response) {
